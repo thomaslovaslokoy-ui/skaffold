@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	//nolint:golint,staticcheck
 	"github.com/golang/protobuf/jsonpb"
@@ -54,7 +55,7 @@ var handler = newHandler()
 
 func newHandler() *eventHandler {
 	h := &eventHandler{
-		eventChan: make(chan firedEvent),
+		eventChan: make(chan firedEvent, 100), // Buffered channel to reduce blocking on event emission
 		state:     &proto.State{},
 	}
 	go func() {
@@ -75,7 +76,7 @@ type eventHandler struct {
 	cfg      Config
 
 	state     *proto.State
-	stateLock sync.Mutex
+	stateLock sync.RWMutex
 	eventChan chan firedEvent
 	listeners []*listener
 }
@@ -88,7 +89,7 @@ type firedEvent struct {
 type listener struct {
 	callback func(*proto.LogEntry) error
 	errors   chan error
-	closed   bool
+	closed   atomic.Bool
 }
 
 func GetState() (*proto.State, error) {
@@ -107,27 +108,34 @@ func Handle(event *proto.Event) error {
 }
 
 func (ev *eventHandler) getState() *proto.State {
-	ev.stateLock.Lock()
+	ev.stateLock.RLock()
 	state := pbuf.Clone(ev.state).(*proto.State)
-	ev.stateLock.Unlock()
+	ev.stateLock.RUnlock()
 	return state
 }
 
 func (ev *eventHandler) logEvent(entry *proto.LogEntry) {
+	// Copy listeners to avoid holding lock during callbacks
 	ev.logLock.Lock()
+	listenersCopy := make([]*listener, len(ev.listeners))
+	copy(listenersCopy, ev.listeners)
+	ev.logLock.Unlock()
 
-	for _, listener := range ev.listeners {
-		if listener.closed {
+	// Execute callbacks without holding the lock
+	for _, listener := range listenersCopy {
+		if listener.closed.Load() {
 			continue
 		}
 
 		if err := listener.callback(entry); err != nil {
 			listener.errors <- err
-			listener.closed = true
+			listener.closed.Store(true)
 		}
 	}
-	ev.eventLog = append(ev.eventLog, entry)
 
+	// Update the event log
+	ev.logLock.Lock()
+	ev.eventLog = append(ev.eventLog, entry)
 	ev.logLock.Unlock()
 }
 
