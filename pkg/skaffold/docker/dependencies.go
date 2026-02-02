@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 
 	"github.com/moby/buildkit/frontend/dockerfile/dockerignore"
 
@@ -186,27 +187,46 @@ func getDependenciesByDockerCopyFromTo(ctx context.Context, workspace string, do
 		return fmt.Errorf("reading .dockerignore: %w", err)
 	}
 
-	ftToDependencies := map[string][]string{}
+	// Collect all From paths to walk the workspace only once
+	deps := make([]string, 0, len(fts))
 	for _, ft := range fts {
-		files, err := WalkWorkspace(workspace, excludes, []string{ft.From})
-		if err != nil {
-			return fmt.Errorf("walking workspace: %w", err)
-		}
+		deps = append(deps, ft.From)
+	}
 
-		// Always add dockerfile even if it's .dockerignored. The daemon will need it anyways.
-		if !filepath.IsAbs(dockerfilePath) {
-			files[dockerfilePath] = true
-		} else {
-			files[absDockerfilePath] = true
-		}
+	// Walk workspace once for all COPY commands
+	allFiles, err := WalkWorkspace(workspace, excludes, deps)
+	if err != nil {
+		return fmt.Errorf("walking workspace: %w", err)
+	}
 
-		// Ignore .dockerignore
-		delete(files, ".dockerignore")
+	// Always add dockerfile even if it's .dockerignored. The daemon will need it anyways.
+	if !filepath.IsAbs(dockerfilePath) {
+		allFiles[dockerfilePath] = true
+	} else {
+		allFiles[absDockerfilePath] = true
+	}
 
+	// Ignore .dockerignore
+	delete(allFiles, ".dockerignore")
+
+	// Group files by their corresponding COPY command
+	// Files are relative to workspace, so we match them against ft.From paths
+	ftToDependencies := make(map[string][]string, len(fts))
+	for _, ft := range fts {
 		var dependencies []string
-		for file := range files {
-			dependencies = append(dependencies, file)
+		
+		// Normalize the from path for comparison
+		fromPath := filepath.Clean(ft.From)
+		
+		for file := range allFiles {
+			fileClean := filepath.Clean(file)
+			
+			// Check if file is the From path itself or under it
+			if fileClean == fromPath || strings.HasPrefix(fileClean, fromPath+string(filepath.Separator)) {
+				dependencies = append(dependencies, file)
+			}
 		}
+		
 		sort.Strings(dependencies)
 		ftToDependencies[ft.String()] = dependencies
 	}
