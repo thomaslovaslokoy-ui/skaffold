@@ -52,7 +52,7 @@ var handler = newHandler()
 
 func newHandler() *eventHandler {
 	h := &eventHandler{
-		eventChan: make(chan *proto.Event),
+		eventChan: make(chan *proto.Event, 100), // Buffered channel to reduce blocking on event emission
 		wait:      make(chan bool, 1),
 		state:     &proto.State{},
 	}
@@ -79,7 +79,7 @@ type eventHandler struct {
 	errorOnce               sync.Once
 	wait                    chan bool
 	state                   *proto.State
-	stateLock               sync.Mutex
+	stateLock               sync.RWMutex
 	eventChan               chan *proto.Event
 	eventListeners          []*listener
 	applicationLogListeners []*listener
@@ -161,9 +161,15 @@ func (ev *eventHandler) logApplicationLog(event *proto.Event) {
 }
 
 func (ev *eventHandler) log(event *proto.Event, listeners *[]*listener, log *[]*proto.Event, lock sync.Locker) {
+	// Copy listeners to avoid holding lock during callbacks
 	lock.Lock()
+	listenersCopy := make([]*listener, len(*listeners))
+	copy(listenersCopy, *listeners)
+	lock.Unlock()
 
-	for _, listener := range *listeners {
+	// Execute callbacks without holding the lock
+	var closedListeners []*listener
+	for _, listener := range listenersCopy {
 		if listener.closed {
 			continue
 		}
@@ -171,10 +177,28 @@ func (ev *eventHandler) log(event *proto.Event, listeners *[]*listener, log *[]*
 		if err := listener.callback(event); err != nil {
 			listener.errors <- err
 			listener.closed = true
+			closedListeners = append(closedListeners, listener)
 		}
 	}
-	*log = append(*log, event)
 
+	// Now update the event log and clean up closed listeners
+	lock.Lock()
+	*log = append(*log, event)
+	
+	// Remove closed listeners from the main list
+	if len(closedListeners) > 0 {
+		filtered := make([]*listener, 0, len(*listeners))
+		closedSet := make(map[*listener]bool)
+		for _, l := range closedListeners {
+			closedSet[l] = true
+		}
+		for _, l := range *listeners {
+			if !closedSet[l] {
+				filtered = append(filtered, l)
+			}
+		}
+		*listeners = filtered
+	}
 	lock.Unlock()
 }
 

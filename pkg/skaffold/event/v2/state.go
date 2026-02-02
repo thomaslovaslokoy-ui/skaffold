@@ -31,10 +31,10 @@ func GetState() (*proto.State, error) {
 }
 
 func (ev *eventHandler) getState() *proto.State {
-	ev.stateLock.Lock()
+	ev.stateLock.RLock()
 	// Deep copy
 	state := pbuf.Clone(ev.state).(*proto.State)
-	ev.stateLock.Unlock()
+	ev.stateLock.RUnlock()
 
 	return state
 }
