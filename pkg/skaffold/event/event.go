@@ -114,43 +114,38 @@ func (ev *eventHandler) getState() *proto.State {
 }
 
 func (ev *eventHandler) logEvent(entry *proto.LogEntry) {
-	// Copy listeners to avoid holding lock during callbacks
+	// Copy listeners and their closed state to avoid holding lock during callbacks
 	ev.logLock.Lock()
-	listenersCopy := make([]*listener, len(ev.listeners))
-	copy(listenersCopy, ev.listeners)
+	type listenerState struct {
+		listener *listener
+		closed   bool
+	}
+	listenerStates := make([]listenerState, len(ev.listeners))
+	for i, l := range ev.listeners {
+		listenerStates[i] = listenerState{listener: l, closed: l.closed}
+	}
 	ev.logLock.Unlock()
 
 	// Execute callbacks without holding the lock
-	var closedListeners []*listener
-	for _, listener := range listenersCopy {
-		if listener.closed {
+	var failedListeners []*listener
+	for _, ls := range listenerStates {
+		if ls.closed {
 			continue
 		}
 
-		if err := listener.callback(entry); err != nil {
-			listener.errors <- err
-			listener.closed = true
-			closedListeners = append(closedListeners, listener)
+		if err := ls.listener.callback(entry); err != nil {
+			ls.listener.errors <- err
+			failedListeners = append(failedListeners, ls.listener)
 		}
 	}
 
-	// Now update the event log and clean up closed listeners
+	// Now update the event log and mark failed listeners as closed
 	ev.logLock.Lock()
 	ev.eventLog = append(ev.eventLog, entry)
 	
-	// Remove closed listeners from the main list
-	if len(closedListeners) > 0 {
-		filtered := make([]*listener, 0, len(ev.listeners))
-		closedSet := make(map[*listener]bool)
-		for _, l := range closedListeners {
-			closedSet[l] = true
-		}
-		for _, l := range ev.listeners {
-			if !closedSet[l] {
-				filtered = append(filtered, l)
-			}
-		}
-		ev.listeners = filtered
+	// Mark failed listeners as closed
+	for _, l := range failedListeners {
+		l.closed = true
 	}
 	ev.logLock.Unlock()
 }

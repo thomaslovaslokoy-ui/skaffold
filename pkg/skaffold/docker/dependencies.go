@@ -221,8 +221,16 @@ func getDependenciesByDockerCopyFromTo(ctx context.Context, workspace string, do
 		for file := range allFiles {
 			fileClean := filepath.Clean(file)
 			
+			// Special case: if fromPath is ".", it matches all files
+			if fromPath == "." {
+				dependencies = append(dependencies, file)
+				continue
+			}
+			
 			// Check if file is the From path itself or under it
-			if fileClean == fromPath || strings.HasPrefix(fileClean, fromPath+string(filepath.Separator)) {
+			// Use filepath.Rel to determine if file is under fromPath
+			relPath, err := filepath.Rel(fromPath, fileClean)
+			if err == nil && !strings.HasPrefix(relPath, ".."+string(filepath.Separator)) && relPath != ".." {
 				dependencies = append(dependencies, file)
 			}
 		}

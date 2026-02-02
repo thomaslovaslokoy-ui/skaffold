@@ -149,9 +149,6 @@ func (l *ManifestList) Append(buf []byte) {
 
 		// Top level key.
 		colonIndex := strings.Index(line, ":")
-		if colonIndex == -1 {
-			continue
-		}
 		key := line[0:colonIndex]
 		
 		if strings.Compare(key, previousKey) > 0 {
