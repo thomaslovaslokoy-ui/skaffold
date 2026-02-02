@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	//nolint:golint,staticcheck
 	"github.com/golang/protobuf/jsonpb"
@@ -88,7 +89,7 @@ type firedEvent struct {
 type listener struct {
 	callback func(*proto.LogEntry) error
 	errors   chan error
-	closed   bool
+	closed   atomic.Bool
 }
 
 func GetState() (*proto.State, error) {
@@ -114,39 +115,27 @@ func (ev *eventHandler) getState() *proto.State {
 }
 
 func (ev *eventHandler) logEvent(entry *proto.LogEntry) {
-	// Copy listeners and their closed state to avoid holding lock during callbacks
+	// Copy listeners to avoid holding lock during callbacks
 	ev.logLock.Lock()
-	type listenerState struct {
-		listener *listener
-		closed   bool
-	}
-	listenerStates := make([]listenerState, len(ev.listeners))
-	for i, l := range ev.listeners {
-		listenerStates[i] = listenerState{listener: l, closed: l.closed}
-	}
+	listenersCopy := make([]*listener, len(ev.listeners))
+	copy(listenersCopy, ev.listeners)
 	ev.logLock.Unlock()
 
 	// Execute callbacks without holding the lock
-	var failedListeners []*listener
-	for _, ls := range listenerStates {
-		if ls.closed {
+	for _, listener := range listenersCopy {
+		if listener.closed.Load() {
 			continue
 		}
 
-		if err := ls.listener.callback(entry); err != nil {
-			ls.listener.errors <- err
-			failedListeners = append(failedListeners, ls.listener)
+		if err := listener.callback(entry); err != nil {
+			listener.errors <- err
+			listener.closed.Store(true)
 		}
 	}
 
-	// Now update the event log and mark failed listeners as closed
+	// Update the event log
 	ev.logLock.Lock()
 	ev.eventLog = append(ev.eventLog, entry)
-	
-	// Mark failed listeners as closed
-	for _, l := range failedListeners {
-		l.closed = true
-	}
 	ev.logLock.Unlock()
 }
 

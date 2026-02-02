@@ -230,7 +230,7 @@ func getDependenciesByDockerCopyFromTo(ctx context.Context, workspace string, do
 			// Check if file is the From path itself or under it
 			// Use filepath.Rel to determine if file is under fromPath
 			relPath, err := filepath.Rel(fromPath, fileClean)
-			if err == nil && !strings.HasPrefix(relPath, ".."+string(filepath.Separator)) && relPath != ".." {
+			if err == nil && !strings.HasPrefix(relPath, "..") {
 				dependencies = append(dependencies, file)
 			}
 		}

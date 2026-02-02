@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	"github.com/acarl005/stripansi"
 	"github.com/golang/protobuf/jsonpb"
@@ -88,7 +89,7 @@ type eventHandler struct {
 type listener struct {
 	callback func(*proto.Event) error
 	errors   chan error
-	closed   bool
+	closed   atomic.Bool
 }
 
 func GetIteration() int {
@@ -161,39 +162,27 @@ func (ev *eventHandler) logApplicationLog(event *proto.Event) {
 }
 
 func (ev *eventHandler) log(event *proto.Event, listeners *[]*listener, log *[]*proto.Event, lock sync.Locker) {
-	// Copy listeners and their closed state to avoid holding lock during callbacks
+	// Copy listeners to avoid holding lock during callbacks
 	lock.Lock()
-	type listenerState struct {
-		listener *listener
-		closed   bool
-	}
-	listenerStates := make([]listenerState, len(*listeners))
-	for i, l := range *listeners {
-		listenerStates[i] = listenerState{listener: l, closed: l.closed}
-	}
+	listenersCopy := make([]*listener, len(*listeners))
+	copy(listenersCopy, *listeners)
 	lock.Unlock()
 
 	// Execute callbacks without holding the lock
-	var failedListeners []*listener
-	for _, ls := range listenerStates {
-		if ls.closed {
+	for _, listener := range listenersCopy {
+		if listener.closed.Load() {
 			continue
 		}
 
-		if err := ls.listener.callback(event); err != nil {
-			ls.listener.errors <- err
-			failedListeners = append(failedListeners, ls.listener)
+		if err := listener.callback(event); err != nil {
+			listener.errors <- err
+			listener.closed.Store(true)
 		}
 	}
 
-	// Now update the event log and mark failed listeners as closed
+	// Update the event log
 	lock.Lock()
 	*log = append(*log, event)
-	
-	// Mark failed listeners as closed
-	for _, l := range failedListeners {
-		l.closed = true
-	}
 	lock.Unlock()
 }
 
