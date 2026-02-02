@@ -26,6 +26,9 @@ import (
 	k8syaml "k8s.io/apimachinery/pkg/util/yaml"
 )
 
+// apiVersionRegex is compiled once to avoid repeated compilation in Append()
+var apiVersionRegex = regexp.MustCompile("(?m)^apiVersion:")
+
 // ManifestList is a list of yaml manifests.
 //
 //nolint:golint
@@ -92,14 +95,22 @@ func Load(in io.Reader) (ManifestList, error) {
 }
 
 func (l *ManifestList) String() string {
-	var str string
+	if len(*l) == 0 {
+		return ""
+	}
+	
+	var builder strings.Builder
+	// Pre-allocate approximate capacity to reduce allocations
+	// Average manifest size ~500 bytes + separators
+	builder.Grow(len(*l) * 500)
+	
 	for i, manifest := range *l {
 		if i != 0 {
-			str += "\n---\n"
+			builder.WriteString("\n---\n")
 		}
-		str += string(bytes.TrimSpace(manifest))
+		builder.Write(bytes.TrimSpace(manifest))
 	}
-	return str
+	return builder.String()
 }
 
 // Append appends the yaml manifests defined in the given buffer.
@@ -107,7 +118,7 @@ func (l *ManifestList) String() string {
 // because `kubectl create --dry-run -oyaml` produces such output.
 func (l *ManifestList) Append(buf []byte) {
 	// If there's at most one `apiVersion` field, then append the `buf` as is.
-	if len(regexp.MustCompile("(?m)^apiVersion:").FindAll(buf, -1)) <= 1 {
+	if len(apiVersionRegex.FindAll(buf, -1)) <= 1 {
 		*l = append(*l, buf)
 		return
 	}
@@ -122,33 +133,42 @@ func (l *ManifestList) Append(buf []byte) {
 	// There are no `---` separators, let's identify each individual manifest
 	// based on the top level keys lexicographical order.
 	yaml := string(buf)
+	lines := strings.Split(yaml, "\n")
 
-	var part string
+	var builder strings.Builder
+	builder.Grow(len(yaml) / 2) // Pre-allocate approximate capacity
 	var previousKey = ""
 
-	for _, line := range strings.Split(yaml, "\n") {
+	for _, line := range lines {
 		// Not a top level key.
 		if strings.HasPrefix(line, "-") || strings.HasPrefix(line, " ") || !strings.Contains(line, ":") {
-			part += "\n" + line
+			builder.WriteByte('\n')
+			builder.WriteString(line)
 			continue
 		}
 
 		// Top level key.
-		key := line[0:strings.Index(line, ":")]
+		colonIndex := strings.Index(line, ":")
+		if colonIndex == -1 {
+			continue
+		}
+		key := line[0:colonIndex]
+		
 		if strings.Compare(key, previousKey) > 0 {
-			if part != "" {
-				part += "\n"
+			if builder.Len() > 0 {
+				builder.WriteByte('\n')
 			}
-			part += line
+			builder.WriteString(line)
 		} else {
-			*l = append(*l, []byte(part))
-			part = line
+			*l = append(*l, []byte(builder.String()))
+			builder.Reset()
+			builder.WriteString(line)
 		}
 
 		previousKey = key
 	}
 
-	*l = append(*l, []byte(part))
+	*l = append(*l, []byte(builder.String()))
 }
 
 // Diff computes the list of manifests that have changed.
